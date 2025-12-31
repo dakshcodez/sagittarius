@@ -11,7 +11,6 @@ import (
 )
 
 func InitFileStorage(meta *filemeta.FileMeta) error {
-
 	if err := os.MkdirAll(chunksDir(meta.FileID), 0755); err != nil {
 		return err
 	}
