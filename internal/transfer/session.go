@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/dakshcodez/sagittarius/internal/filemeta"
 )
@@ -52,7 +53,6 @@ func NewDownloadSession(
 
 	missing := storage.GetMissingChunks(meta)
 
-	// Convert missing slice to set for O(1) lookup
 	missingSet := make(map[int]bool)
 	for _, m := range missing {
 		missingSet[m] = true
@@ -105,17 +105,14 @@ func (s *DownloadSession) HandleChunkResponse(
 	data []byte,
 ) error {
 
-	// Verify chunk integrity before saving
 	if err := s.verifyChunk(index, data); err != nil {
 		return err
 	}
 
-	// Persist chunk to storage
 	if err := s.storage.SaveChunk(s.fileID, index, data); err != nil {
 		return err
 	}
 
-	// Update transfer state
 	s.MarkChunkComplete(index)
 
 	return nil
@@ -162,4 +159,28 @@ func (s *DownloadSession) verifyChunk(index int, data []byte) error {
 	}
 
 	return nil
+}
+
+// StartDownload begins requesting chunks in a background loop.
+func (s *DownloadSession) StartDownload(sender NetworkSender) {
+	go func() {
+		for {
+			chunk, err := s.NextChunkToRequest()
+			if err != nil {
+				return
+			}
+
+			req := map[string]any{
+				"type":        "CHUNK_REQUEST",
+				"file_id":     s.fileID,
+				"chunk_index": chunk.Index,
+			}
+
+			if err := sender.Send(req); err != nil {
+				return
+			}
+
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
 }
