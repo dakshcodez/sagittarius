@@ -3,11 +3,14 @@ package transfer
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"log"
 	"sync"
 	"time"
 
 	"github.com/dakshcodez/sagittarius/internal/filemeta"
+	"github.com/dakshcodez/sagittarius/internal/network"
 )
 
 type ChunkStatus int
@@ -106,6 +109,7 @@ func (s *DownloadSession) HandleChunkResponse(
 ) error {
 
 	if err := s.verifyChunk(index, data); err != nil {
+		log.Println("verify failed:", err)
 		return err
 	}
 
@@ -133,14 +137,25 @@ func (s *DownloadSession) HandleChunkRequest(
 		return err
 	}
 
-	resp := map[string]any{
-		"type":        "CHUNK_RESPONSE",
-		"file_id":     s.fileID,
-		"chunk_index": index,
-		"data":        data,
+	payload, err := json.Marshal(struct {
+		FileID     string `json:"file_id"`
+		ChunkIndex int    `json:"chunk_index"`
+		Data       []byte `json:"data"`
+	}{
+		FileID:     s.fileID,
+		ChunkIndex: index,
+		Data:       data,
+	})
+	if err != nil {
+		return err
 	}
 
-	return sender.Send(resp)
+	msg := network.Message{
+		Type:    "CHUNK_RESPONSE",
+		Payload: payload,
+	}
+
+	return sender.Send(msg)
 }
 
 // verifyChunk ensures data matches expected hash.
@@ -170,13 +185,24 @@ func (s *DownloadSession) StartDownload(sender NetworkSender) {
 				return
 			}
 
-			req := map[string]any{
-				"type":        "CHUNK_REQUEST",
-				"file_id":     s.fileID,
-				"chunk_index": chunk.Index,
+			payload, err := json.Marshal(struct {
+				FileID     string `json:"file_id"`
+				ChunkIndex int    `json:"chunk_index"`
+			}{
+				FileID:     s.fileID,
+				ChunkIndex: chunk.Index,
+			})
+			if err != nil {
+				return
 			}
 
-			if err := sender.Send(req); err != nil {
+			msg := network.Message{
+				Type:     "CHUNK_REQUEST",
+				SenderID: "downloader",
+				Payload:  payload,
+			}
+
+			if err := sender.Send(msg); err != nil {
 				return
 			}
 
