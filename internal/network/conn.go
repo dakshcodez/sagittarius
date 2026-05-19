@@ -13,7 +13,7 @@ func NewConn(c net.Conn) *Conn {
 	return &Conn{Conn: c}
 }
 
-func (c *Conn) Send(msg Message) error {
+func (c *Conn) Send(msg any) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
