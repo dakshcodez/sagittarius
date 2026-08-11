@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"time"
 
 	"github.com/dakshcodez/sagittarius/internal/nat"
@@ -145,6 +146,36 @@ func (c *natClient) connect(targetPeerID string) ([]string, error) {
 	return punch.Candidates, nil
 }
 
+// relay opens a stream on the tracker control connection, sends a RELAY
+// header naming targetPeerID, and returns the raw stream: from here on
+// it's a byte pipe the tracker splices to the target's matching half, so
+// everything written to/read from it is ordinary P2P protocol traffic.
+func (c *natClient) relay(targetPeerID string) (net.Conn, error) {
+	streamConn, err := quicconn.OpenStream(c.trackerConn)
+	if err != nil {
+		return nil, fmt.Errorf("open relay stream: %w", err)
+	}
+
+	conn := network.NewConn(streamConn)
+
+	data, err := json.Marshal(trackersrv.RelayPayload{TargetPeerID: targetPeerID})
+	if err != nil {
+		streamConn.Close()
+		return nil, err
+	}
+
+	if err := conn.Send(network.Message{
+		Type:     trackersrv.MsgRelay,
+		SenderID: c.selfID,
+		Payload:  data,
+	}); err != nil {
+		streamConn.Close()
+		return nil, fmt.Errorf("send relay request: %w", err)
+	}
+
+	return streamConn, nil
+}
+
 // keepalive periodically re-registers so the tracker's TTL sweep doesn't
 // evict us, and so the NAT mapping the tracker observed stays open.
 func (c *natClient) keepalive(localCandidates []string) {
@@ -159,9 +190,15 @@ func (c *natClient) keepalive(localCandidates []string) {
 }
 
 // runPushListener accepts streams the tracker opens on our control
-// connection (unprompted PUNCH signals naming a peer who wants to
-// connect to us) and hands each off to onPunch.
-func (c *natClient) runPushListener(onPunch func(peerID string, candidates []string)) {
+// connection: either an unprompted PUNCH signal naming a peer who wants
+// to connect to us (handed to onPunch), or a RELAY header marking the
+// stream itself as a relayed data connection from that peer (handed to
+// onRelay, which is expected to run it through the same handshake +
+// message loop as any directly-accepted connection).
+func (c *natClient) runPushListener(
+	onPunch func(peerID string, candidates []string),
+	onRelay func(raw net.Conn),
+) {
 	ctx := c.trackerConn.Context()
 
 	for {
@@ -171,22 +208,25 @@ func (c *natClient) runPushListener(onPunch func(peerID string, candidates []str
 		}
 
 		go func() {
-			conn := network.NewConn(quicconn.Wrap(c.trackerConn, stream))
+			raw := quicconn.Wrap(c.trackerConn, stream)
+			conn := network.NewConn(raw)
 
 			msg, err := conn.Receive()
 			if err != nil {
 				return
 			}
-			if msg.Type != trackersrv.MsgPunch {
-				return
-			}
 
-			var p trackersrv.PunchPayload
-			if err := json.Unmarshal(msg.Payload, &p); err != nil {
-				return
-			}
+			switch msg.Type {
+			case trackersrv.MsgPunch:
+				var p trackersrv.PunchPayload
+				if err := json.Unmarshal(msg.Payload, &p); err != nil {
+					return
+				}
+				onPunch(p.PeerID, p.Candidates)
 
-			onPunch(p.PeerID, p.Candidates)
+			case trackersrv.MsgRelay:
+				onRelay(raw)
+			}
 		}()
 	}
 }

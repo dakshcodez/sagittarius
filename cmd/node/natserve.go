@@ -46,11 +46,30 @@ func natAcceptStreams(qconn *quic.Conn, tm *transfer.TransferManager) {
 
 // natConnectToPeer asks the tracker to broker a connection to
 // targetPeerID, races dials against every candidate it returns, and
-// performs the initiator handshake on the winning connection. The
-// returned bool is true when the winning candidate was a LAN address
-// (i.e. no NAT traversal was actually needed) - useful for logging
-// direct vs. punched.
+// performs the initiator handshake on the winning connection. If no
+// candidate is reachable within timeout (e.g. both peers are behind
+// symmetric NATs), it falls back to relaying the connection through the
+// tracker. The returned label describes which path won ("<addr>" for a
+// direct/punched connection, "relayed via tracker" otherwise) - useful
+// for logging.
 func natConnectToPeer(
+	client *natClient,
+	socket *nat.Socket,
+	selfID, targetPeerID string,
+	timeout time.Duration,
+) (*network.Conn, string, string, error) {
+
+	conn, peerID, label, err := natPunchToPeer(client, socket, selfID, targetPeerID, timeout)
+	if err == nil {
+		return conn, peerID, label, nil
+	}
+
+	log.Printf("node: punch to %s failed (%v), falling back to relay", targetPeerID, err)
+
+	return natRelayToPeer(client, selfID, targetPeerID)
+}
+
+func natPunchToPeer(
 	client *natClient,
 	socket *nat.Socket,
 	selfID, targetPeerID string,
@@ -84,4 +103,21 @@ func natConnectToPeer(
 	}
 
 	return conn, peerID, winningAddr, nil
+}
+
+func natRelayToPeer(client *natClient, selfID, targetPeerID string) (*network.Conn, string, string, error) {
+	raw, err := client.relay(targetPeerID)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("relay to %s: %w", targetPeerID, err)
+	}
+
+	conn := network.NewConn(raw)
+
+	peerID, err := handshakeAsInitiator(conn, selfID)
+	if err != nil {
+		raw.Close()
+		return nil, "", "", fmt.Errorf("handshake with %s (relayed): %w", targetPeerID, err)
+	}
+
+	return conn, peerID, "relayed via tracker", nil
 }

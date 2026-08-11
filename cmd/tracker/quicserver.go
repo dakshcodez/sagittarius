@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 
 	"github.com/dakshcodez/sagittarius/internal/nat"
 	"github.com/dakshcodez/sagittarius/internal/network"
@@ -14,8 +15,9 @@ import (
 
 // serveQUIC runs the tracker's NAT-rendezvous listener: nodes dial in
 // once and keep the connection open, opening a fresh stream per request
-// (REGISTER, LOOKUP, CONNECT, ...) and accepting pushed streams (PUNCH
-// signals) the tracker opens back at them.
+// (REGISTER, LOOKUP, CONNECT, RELAY, ...) and accepting pushed streams
+// (PUNCH signals, relayed data connections) the tracker opens back at
+// them.
 func serveQUIC(server *trackersrv.Server, udpAddr string) {
 	socket, err := nat.Open(udpAddr)
 	if err != nil {
@@ -54,33 +56,69 @@ func serveQUICConn(server *trackersrv.Server, qconn *quic.Conn) {
 			return
 		}
 
-		go handleConn(server, quicconn.Wrap(qconn, stream), rc)
+		go handleQUICStream(server, quicconn.Wrap(qconn, stream), rc)
 	}
 }
 
-// quicPusher lets the tracker registry proactively deliver a message
-// (namely PUNCH) to a peer by opening a new stream on its already-open
+// handleQUICStream peeks at the first message on a newly opened stream:
+// a RELAY switches the stream into raw byte-splicing mode (see relay.go)
+// instead of the normal JSON request/reply dispatch.
+func handleQUICStream(server *trackersrv.Server, raw net.Conn, rc trackersrv.RequestContext) {
+	conn := network.NewConn(raw)
+
+	msg, err := conn.Receive()
+	if err != nil {
+		raw.Close()
+		return
+	}
+
+	if msg.Type == trackersrv.MsgRelay {
+		handleRelay(server.Registry, raw, msg)
+		return
+	}
+
+	if err := server.HandleMessage(msg, conn, rc); err != nil {
+		log.Printf("tracker: error handling %s from %s: %v", msg.Type, msg.SenderID, err)
+	}
+
+	handleConn(server, raw, rc)
+}
+
+// quicPusher lets the tracker registry proactively deliver a message to
+// a peer, or open a raw stream to it, by acting on its already-open
 // control connection.
 type quicPusher struct {
 	qconn *quic.Conn
 }
 
 func (p *quicPusher) Push(msgType string, payload any) error {
-	data, err := json.Marshal(payload)
+	stream, err := p.OpenStream(msgType, payload)
 	if err != nil {
 		return err
+	}
+	return stream.Close()
+}
+
+func (p *quicPusher) OpenStream(msgType string, payload any) (net.Conn, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
 	}
 
 	stream, err := quicconn.OpenStream(p.qconn)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer stream.Close()
 
 	conn := network.NewConn(stream)
-	return conn.Send(network.Message{
+	if err := conn.Send(network.Message{
 		Type:     msgType,
 		SenderID: "tracker",
 		Payload:  data,
-	})
+	}); err != nil {
+		stream.Close()
+		return nil, err
+	}
+
+	return stream, nil
 }

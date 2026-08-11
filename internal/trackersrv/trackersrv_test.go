@@ -113,6 +113,12 @@ func (f *fakePusher) Push(msgType string, payload any) error {
 	return nil
 }
 
+func (f *fakePusher) OpenStream(msgType string, payload any) (net.Conn, error) {
+	f.pushes = append(f.pushes, pushedMsg{msgType: msgType, payload: payload})
+	a, _ := net.Pipe()
+	return a, nil
+}
+
 func TestConnectSignalsPunchBothWays(t *testing.T) {
 	registry := trackersrv.NewRegistry()
 	server := trackersrv.NewServer("tracker", registry)

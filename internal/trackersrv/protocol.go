@@ -10,6 +10,7 @@ const (
 	MsgPeerList    = "PEER_LIST"
 	MsgConnect     = "CONNECT"
 	MsgPunch       = "PUNCH"
+	MsgRelay       = "RELAY"
 )
 
 // PeerInfo describes one peer known to have a file, as returned by LOOKUP.
@@ -54,6 +55,17 @@ type ConnectPayload struct {
 type PunchPayload struct {
 	PeerID     string   `json:"peer_id"`
 	Candidates []string `json:"candidates"`
+}
+
+// RelayPayload is sent as the first message on a stream that should
+// become a raw byte pipe to another peer, relayed through the tracker:
+// once sent, everything else written to/read from that same stream is
+// opaque P2P protocol traffic the tracker just splices through, not
+// something it parses. It doubles as the header the tracker attaches
+// when it opens the matching stream on the target's side (there PeerID
+// identifies the relay's initiator instead).
+type RelayPayload struct {
+	TargetPeerID string `json:"target_peer_id"`
 }
 
 type AnnouncePayload struct {

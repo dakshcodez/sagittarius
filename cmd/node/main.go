@@ -30,6 +30,7 @@ func main() {
 	natMode := flag.Bool("nat", false, "reach the tracker and peers over QUIC/UDP with NAT hole punching, instead of plain TCP")
 	udpListen := flag.String("udp-listen", ":0", "UDP address to bind for --nat mode")
 	trackerUDP := flag.String("tracker-udp", "127.0.0.1:9090", "tracker's QUIC/UDP rendezvous address, for --nat mode")
+	forceRelay := flag.Bool("force-relay", false, "skip hole punching and always relay through the tracker (for testing the relay fallback)")
 
 	flag.Parse()
 
@@ -54,7 +55,7 @@ func main() {
 	var connect connectFunc
 
 	if *natMode {
-		announce, lookup, connect = setupNAT(*udpListen, *trackerUDP, selfID, tm)
+		announce, lookup, connect = setupNAT(*udpListen, *trackerUDP, selfID, tm, *forceRelay)
 	} else {
 		announce, lookup, connect = setupTCP(*listenAddr, *trackerAddr, selfID, tm)
 	}
@@ -115,7 +116,7 @@ func setupTCP(listenAddr, trackerAddr, selfID string, tm *transfer.TransferManag
 // to register with the tracker (learning our reflexive address) and as
 // an ambient listener peers can punch through to, plus tracker-brokered
 // CONNECT/PUNCH signaling for reaching peers that are behind a NAT.
-func setupNAT(udpListen, trackerUDP, selfID string, tm *transfer.TransferManager) (announceFunc, lookupFunc, connectFunc) {
+func setupNAT(udpListen, trackerUDP, selfID string, tm *transfer.TransferManager, forceRelay bool) (announceFunc, lookupFunc, connectFunc) {
 	socket, err := nat.Open(udpListen)
 	if err != nil {
 		log.Fatalf("node: nat socket on %s failed: %v", udpListen, err)
@@ -142,17 +143,32 @@ func setupNAT(udpListen, trackerUDP, selfID string, tm *transfer.TransferManager
 
 	go client.keepalive(localCandidates)
 
-	go client.runPushListener(func(peerID string, candidates []string) {
-		log.Printf("node: punch signal from %s, candidates %v", peerID, candidates)
-		nat.PunchCandidates(socket, candidates, nat.DefaultPunchTimeout)
-	})
+	go client.runPushListener(
+		func(peerID string, candidates []string) {
+			log.Printf("node: punch signal from %s, candidates %v", peerID, candidates)
+			nat.PunchCandidates(socket, candidates, nat.DefaultPunchTimeout)
+		},
+		func(raw net.Conn) {
+			log.Printf("node: accepted relayed connection via tracker")
+			handleIncoming(raw, tm)
+		},
+	)
 
 	announce := client.announce
 	lookup := client.lookup
 	connect := func(peer trackersrv.PeerInfo) (*network.Conn, string, error) {
-		conn, peerID, winningAddr, err := natConnectToPeer(client, socket, selfID, peer.PeerID, nat.DefaultPunchTimeout)
+		var conn *network.Conn
+		var peerID, via string
+		var err error
+
+		if forceRelay {
+			conn, peerID, via, err = natRelayToPeer(client, selfID, peer.PeerID)
+		} else {
+			conn, peerID, via, err = natConnectToPeer(client, socket, selfID, peer.PeerID, nat.DefaultPunchTimeout)
+		}
+
 		if err == nil {
-			log.Printf("node: connected to %s via %s", peerID, winningAddr)
+			log.Printf("node: connected to %s via %s", peerID, via)
 		}
 		return conn, peerID, err
 	}

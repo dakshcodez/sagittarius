@@ -1,6 +1,8 @@
 package trackersrv
 
 import (
+	"fmt"
+	"net"
 	"sync"
 	"time"
 )
@@ -11,13 +13,15 @@ const (
 )
 
 // Pusher lets the tracker proactively deliver a message to a registered
-// peer outside of any request/response exchange - used to signal PUNCH
-// to the target of someone else's CONNECT. Implemented by cmd/tracker's
-// QUIC-serving code (opens a new stream on the peer's control
-// connection); nil for peers registered over the plain-TCP path, which
-// have no persistent connection to push on.
+// peer outside of any request/response exchange, or open a raw stream to
+// it that the peer will treat as a data connection (used respectively to
+// signal PUNCH to the target of someone else's CONNECT, and to relay a
+// connection when punching fails). Implemented by cmd/tracker's
+// QUIC-serving code; nil for peers registered over the plain-TCP path,
+// which have no persistent connection to push on.
 type Pusher interface {
 	Push(msgType string, payload any) error
+	OpenStream(msgType string, payload any) (net.Conn, error)
 }
 
 type peerEntry struct {
@@ -151,6 +155,22 @@ func (r *Registry) PushTo(peerID, msgType string, payload any) (delivered bool, 
 	}
 
 	return true, e.pusher.Push(msgType, payload)
+}
+
+// OpenRelayStream opens a new stream on peerID's control connection (via
+// its registered Pusher) with msgType/payload as the first framed message
+// on it - used to hand the target of a RELAY its half of the relayed
+// pipe. Errors if the peer isn't registered over the QUIC/NAT path.
+func (r *Registry) OpenRelayStream(peerID, msgType string, payload any) (net.Conn, error) {
+	r.mu.Lock()
+	e, ok := r.peers[peerID]
+	r.mu.Unlock()
+
+	if !ok || e.pusher == nil {
+		return nil, fmt.Errorf("peer %s has no open connection to relay through", peerID)
+	}
+
+	return e.pusher.OpenStream(msgType, payload)
 }
 
 // Sweep evicts peers (and their file associations) not seen within ttl.
