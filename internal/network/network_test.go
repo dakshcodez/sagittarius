@@ -1,6 +1,7 @@
 package network
 
 import (
+	"encoding/binary"
 	"net"
 	"testing"
 )
@@ -83,5 +84,22 @@ func TestHandshakeRejectsWrongMessage(t *testing.T) {
 	_, err := ReceiveHandshake(conn2)
 	if err == nil {
 		t.Fatal("expected handshake error, got nil")
+	}
+}
+
+func TestReadFrameRejectsOversizedLength(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	go func() {
+		var lengthBuf [4]byte
+		binary.BigEndian.PutUint32(lengthBuf[:], MaxFrameSize+1)
+		c1.Write(lengthBuf[:])
+	}()
+
+	_, err := ReadFrame(c2)
+	if err == nil {
+		t.Fatal("expected ReadFrame to reject a length above MaxFrameSize")
 	}
 }
