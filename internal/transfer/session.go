@@ -91,6 +91,20 @@ func (s *DownloadSession) NextChunkToRequest() (*ChunkState, error) {
 	return nil, errors.New("no chunks to request")
 }
 
+// IsComplete reports whether every chunk has been downloaded.
+func (s *DownloadSession) IsComplete() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, c := range s.chunks {
+		if c.Status != ChunkComplete {
+			return false
+		}
+	}
+
+	return true
+}
+
 // MarkChunkComplete marks a chunk as complete.
 func (s *DownloadSession) MarkChunkComplete(index int) {
 	s.mu.Lock()

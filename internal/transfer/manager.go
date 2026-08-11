@@ -35,6 +35,20 @@ func (tm *TransferManager) GetSession(fileID string) (*DownloadSession, bool) {
 	return s, ok
 }
 
+// SelfID returns this manager's peer ID.
+func (tm *TransferManager) SelfID() string {
+	return tm.selfID
+}
+
+// GetMeta retrieves a previously registered FileMeta by fileID.
+func (tm *TransferManager) GetMeta(fileID string) (*filemeta.FileMeta, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	m, ok := tm.metas[fileID]
+	return m, ok
+}
+
 // AddSession registers a new download session.
 func (tm *TransferManager) AddSession(s *DownloadSession) {
 	tm.mu.Lock()
