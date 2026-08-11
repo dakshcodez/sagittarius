@@ -1,11 +1,10 @@
-package storage
+package storage_test
 
 import (
-	"os"
-	//"path/filepath"
 	"testing"
 
 	"github.com/dakshcodez/sagittarius/internal/filemeta"
+	"github.com/dakshcodez/sagittarius/internal/storage"
 )
 
 // helper: create fake FileMeta
@@ -26,53 +25,55 @@ func testMeta() *filemeta.FileMeta {
 
 func TestInitFileStorage(t *testing.T) {
 	meta := testMeta()
+	st := storage.NewLocalStorage(t.TempDir())
 
-	// clean before test
-	os.RemoveAll(baseDir)
-	defer os.RemoveAll(baseDir)
-
-	if err := InitFileStorage(meta); err != nil {
+	if err := st.InitFileStorage(meta); err != nil {
 		t.Fatalf("InitFileStorage failed: %v", err)
 	}
 
-	if _, err := os.Stat(metaPath(meta.FileID)); err != nil {
-		t.Fatal("meta.json was not created")
+	loaded, err := st.LoadFileMeta(meta.FileID)
+	if err != nil {
+		t.Fatalf("LoadFileMeta failed: %v", err)
 	}
 
-	if _, err := os.Stat(statePath(meta.FileID)); err != nil {
-		t.Fatal("state.json was not created")
+	if loaded.FileID != meta.FileID || loaded.NumChunks != meta.NumChunks {
+		t.Fatalf("loaded meta does not match: %+v", loaded)
 	}
 }
 
 func TestSaveAndHasChunk(t *testing.T) {
 	meta := testMeta()
-	os.RemoveAll(baseDir)
-	defer os.RemoveAll(baseDir)
+	st := storage.NewLocalStorage(t.TempDir())
 
-	InitFileStorage(meta)
+	if err := st.InitFileStorage(meta); err != nil {
+		t.Fatal(err)
+	}
 
 	data := []byte("chunk-data")
 
-	if err := SaveChunk(meta.FileID, 1, data); err != nil {
+	if err := st.SaveChunk(meta.FileID, 1, data); err != nil {
 		t.Fatalf("SaveChunk failed: %v", err)
 	}
 
-	if !HasChunk(meta.FileID, 1) {
+	if !st.HasChunk(meta.FileID, 1) {
 		t.Fatal("HasChunk returned false for saved chunk")
 	}
 }
 
 func TestLoadChunk(t *testing.T) {
 	meta := testMeta()
-	os.RemoveAll(baseDir)
-	defer os.RemoveAll(baseDir)
+	st := storage.NewLocalStorage(t.TempDir())
 
-	InitFileStorage(meta)
+	if err := st.InitFileStorage(meta); err != nil {
+		t.Fatal(err)
+	}
 
 	expected := []byte("hello")
-	SaveChunk(meta.FileID, 0, expected)
+	if err := st.SaveChunk(meta.FileID, 0, expected); err != nil {
+		t.Fatal(err)
+	}
 
-	data, err := LoadChunk(meta.FileID, 0)
+	data, err := st.LoadChunk(meta.FileID, 0)
 	if err != nil {
 		t.Fatalf("LoadChunk failed: %v", err)
 	}
@@ -84,13 +85,16 @@ func TestLoadChunk(t *testing.T) {
 
 func TestGetMissingChunks(t *testing.T) {
 	meta := testMeta()
-	os.RemoveAll(baseDir)
-	defer os.RemoveAll(baseDir)
+	st := storage.NewLocalStorage(t.TempDir())
 
-	InitFileStorage(meta)
-	SaveChunk(meta.FileID, 0, []byte("a"))
+	if err := st.InitFileStorage(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveChunk(meta.FileID, 0, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
 
-	missing := GetMissingChunks(meta)
+	missing := st.GetMissingChunks(meta)
 
 	if len(missing) != 2 {
 		t.Fatalf("expected 2 missing chunks, got %d", len(missing))
@@ -99,15 +103,27 @@ func TestGetMissingChunks(t *testing.T) {
 
 func TestResumeAfterRestart(t *testing.T) {
 	meta := testMeta()
-	os.RemoveAll(baseDir)
-	defer os.RemoveAll(baseDir)
+	dir := t.TempDir()
+	st := storage.NewLocalStorage(dir)
 
 	// first "run"
-	InitFileStorage(meta)
-	SaveChunk(meta.FileID, 1, []byte("data"))
+	if err := st.InitFileStorage(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveChunk(meta.FileID, 1, []byte("data")); err != nil {
+		t.Fatal(err)
+	}
 
-	// simulate restart by reloading state
-	missing := GetMissingChunks(meta)
+	// simulate restart: fresh LocalStorage over the same directory, and
+	// reload meta from disk the way a real restart would.
+	restarted := storage.NewLocalStorage(dir)
+
+	reloadedMeta, err := restarted.LoadFileMeta(meta.FileID)
+	if err != nil {
+		t.Fatalf("LoadFileMeta failed after restart: %v", err)
+	}
+
+	missing := restarted.GetMissingChunks(reloadedMeta)
 
 	for _, idx := range missing {
 		if idx == 1 {

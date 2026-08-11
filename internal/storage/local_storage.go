@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,40 @@ func (s *LocalStorage) chunkPath(fileID string, index int) string {
 func (s *LocalStorage) ensureChunkDir(fileID string) error {
 	dir := filepath.Join(s.baseDir, fileID, "chunks")
 	return os.MkdirAll(dir, 0755)
+}
+
+func (s *LocalStorage) metaPath(fileID string) string {
+	return filepath.Join(s.baseDir, fileID, "meta.json")
+}
+
+// InitFileStorage creates the on-disk layout for a file (chunks dir +
+// meta.json) so chunks can subsequently be saved/loaded against it.
+func (s *LocalStorage) InitFileStorage(meta *filemeta.FileMeta) error {
+	if err := s.ensureChunkDir(meta.FileID); err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(s.metaPath(meta.FileID), data, 0644)
+}
+
+// LoadFileMeta reads back a previously initialized file's metadata.
+func (s *LocalStorage) LoadFileMeta(fileID string) (*filemeta.FileMeta, error) {
+	data, err := os.ReadFile(s.metaPath(fileID))
+	if err != nil {
+		return nil, err
+	}
+
+	var meta filemeta.FileMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+
+	return &meta, nil
 }
 
 func (s *LocalStorage) HasChunk(fileID string, index int) bool {
