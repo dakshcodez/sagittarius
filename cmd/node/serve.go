@@ -27,22 +27,18 @@ func acceptLoop(listener net.Listener, tm *transfer.TransferManager) {
 	}
 }
 
-// handleIncoming performs the responder side of the handshake (receive
-// then reply) and then feeds every subsequent message to the transfer
-// manager until the connection closes.
+// handleIncoming performs the responder side of the handshake and then
+// feeds every subsequent message to the transfer manager until the
+// connection closes. It works the same regardless of whether raw is a
+// plain TCP connection or a quicconn-wrapped QUIC stream.
 func handleIncoming(raw net.Conn, tm *transfer.TransferManager) {
 	defer raw.Close()
 
 	conn := network.NewConn(raw)
 
-	peerID, err := network.ReceiveHandshake(conn)
+	peerID, err := handshakeAsResponder(conn, tm.SelfID())
 	if err != nil {
 		log.Printf("node: handshake from %s failed: %v", raw.RemoteAddr(), err)
-		return
-	}
-
-	if err := network.SendHandshake(conn, tm.SelfID()); err != nil {
-		log.Printf("node: handshake reply to %s failed: %v", peerID, err)
 		return
 	}
 
@@ -51,8 +47,8 @@ func handleIncoming(raw net.Conn, tm *transfer.TransferManager) {
 	messageLoop(conn, tm, peerID)
 }
 
-// dialPeer performs the initiator side of the handshake (send then
-// receive) and returns a ready-to-use connection.
+// dialPeer performs the initiator side of the handshake over a plain TCP
+// dial and returns a ready-to-use connection.
 func dialPeer(addr string, selfID string) (*network.Conn, string, error) {
 	raw, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -61,18 +57,35 @@ func dialPeer(addr string, selfID string) (*network.Conn, string, error) {
 
 	conn := network.NewConn(raw)
 
-	if err := network.SendHandshake(conn, selfID); err != nil {
-		raw.Close()
-		return nil, "", err
-	}
-
-	peerID, err := network.ReceiveHandshake(conn)
+	peerID, err := handshakeAsInitiator(conn, selfID)
 	if err != nil {
 		raw.Close()
 		return nil, "", err
 	}
 
 	return conn, peerID, nil
+}
+
+// handshakeAsInitiator sends first, then waits for the responder's reply -
+// used by whichever side opened the connection/stream.
+func handshakeAsInitiator(conn *network.Conn, selfID string) (peerID string, err error) {
+	if err := network.SendHandshake(conn, selfID); err != nil {
+		return "", err
+	}
+	return network.ReceiveHandshake(conn)
+}
+
+// handshakeAsResponder waits for the initiator's handshake first, then
+// replies - used by whichever side accepted the connection/stream.
+func handshakeAsResponder(conn *network.Conn, selfID string) (peerID string, err error) {
+	peerID, err = network.ReceiveHandshake(conn)
+	if err != nil {
+		return "", err
+	}
+	if err := network.SendHandshake(conn, selfID); err != nil {
+		return "", err
+	}
+	return peerID, nil
 }
 
 // messageLoop feeds every message received on conn to the transfer

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"log"
 	"net"
@@ -12,7 +13,8 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":9090", "address for the tracker to listen on")
+	addr := flag.String("addr", ":9090", "TCP address for the tracker to listen on (plain-TCP peers/dev convenience)")
+	udpAddr := flag.String("udp-addr", ":9090", "UDP address for the tracker's QUIC/NAT-rendezvous listener")
 	flag.Parse()
 
 	registry := trackersrv.NewRegistry()
@@ -27,20 +29,25 @@ func main() {
 	}
 	defer listener.Close()
 
-	log.Printf("tracker: listening on %s", *addr)
+	log.Printf("tracker: TCP listening on %s", *addr)
+
+	go serveQUIC(server, *udpAddr)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
 			log.Printf("tracker: accept failed: %v", err)
 			continue
 		}
 
-		go handleConn(server, conn)
+		go handleConn(server, conn, trackersrv.RequestContext{})
 	}
 }
 
-func handleConn(server *trackersrv.Server, raw net.Conn) {
+func handleConn(server *trackersrv.Server, raw net.Conn, rc trackersrv.RequestContext) {
 	defer raw.Close()
 
 	conn := network.NewConn(raw)
@@ -51,7 +58,7 @@ func handleConn(server *trackersrv.Server, raw net.Conn) {
 			return
 		}
 
-		if err := server.HandleMessage(msg, conn); err != nil {
+		if err := server.HandleMessage(msg, conn, rc); err != nil {
 			log.Printf("tracker: error handling %s from %s: %v", msg.Type, msg.SenderID, err)
 		}
 	}

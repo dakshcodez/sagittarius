@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/dakshcodez/sagittarius/internal/filemeta"
+	"github.com/dakshcodez/sagittarius/internal/network"
 	"github.com/dakshcodez/sagittarius/internal/storage"
+	"github.com/dakshcodez/sagittarius/internal/trackersrv"
 	"github.com/dakshcodez/sagittarius/internal/transfer"
 )
 
@@ -17,18 +19,26 @@ const (
 	progressLogInterval = 2 * time.Second
 )
 
-// downloadFile looks up peers for fileID via the tracker, connects to one,
-// fetches its metadata, downloads every chunk, and reconstructs the file
-// into outDir. On success it leaves the download session registered with
-// tm so this node can go on to seed the file to others.
+// lookupFunc finds peers advertising a file; connectFunc establishes a
+// ready-to-use (post-handshake) connection to one of them. Both are
+// supplied by the caller so downloadFile works identically over the
+// plain-TCP path (Phase 1) and the QUIC/NAT path (Phase 2).
+type lookupFunc func(fileID string) ([]trackersrv.PeerInfo, error)
+type connectFunc func(peer trackersrv.PeerInfo) (*network.Conn, string, error)
+
+// downloadFile looks up peers for fileID, connects to one, fetches its
+// metadata, downloads every chunk, and reconstructs the file into outDir.
+// On success it leaves the download session registered with tm so this
+// node can go on to seed the file to others.
 func downloadFile(
 	fileID, outDir string,
 	st *storage.LocalStorage,
 	tm *transfer.TransferManager,
-	trackerAddr, selfID string,
+	lookup lookupFunc,
+	connect connectFunc,
 ) (string, error) {
 
-	peers, err := lookupPeers(trackerAddr, selfID, fileID)
+	peers, err := lookup(fileID)
 	if err != nil {
 		return "", fmt.Errorf("lookup %s: %w", fileID, err)
 	}
@@ -38,11 +48,11 @@ func downloadFile(
 
 	var lastErr error
 	for _, peer := range peers {
-		path, err := downloadFrom(peer.Addr, fileID, outDir, st, tm, selfID)
+		path, err := downloadFrom(peer, fileID, outDir, st, tm, connect)
 		if err == nil {
 			return path, nil
 		}
-		log.Printf("node: download from %s (%s) failed: %v", peer.PeerID, peer.Addr, err)
+		log.Printf("node: download from %s failed: %v", peer.PeerID, err)
 		lastErr = err
 	}
 
@@ -50,13 +60,14 @@ func downloadFile(
 }
 
 func downloadFrom(
-	peerAddr, fileID, outDir string,
+	peer trackersrv.PeerInfo,
+	fileID, outDir string,
 	st *storage.LocalStorage,
 	tm *transfer.TransferManager,
-	selfID string,
+	connect connectFunc,
 ) (string, error) {
 
-	conn, peerID, err := dialPeer(peerAddr, selfID)
+	conn, peerID, err := connect(peer)
 	if err != nil {
 		return "", fmt.Errorf("connect: %w", err)
 	}

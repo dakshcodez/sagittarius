@@ -10,6 +10,11 @@ import (
 	"github.com/dakshcodez/sagittarius/internal/transfer"
 )
 
+// announceFunc tells the tracker this node has a file available. Supplied
+// by the caller so seedFile works identically over the plain-TCP path
+// (Phase 1) and the QUIC/NAT path (Phase 2).
+type announceFunc func(fileID string) error
+
 // seedFile hashes/chunks filePath, copies its chunk data into local
 // storage, registers it with the transfer manager as a fully-complete
 // download session (i.e. a seeder), and announces it to the tracker.
@@ -17,7 +22,7 @@ func seedFile(
 	filePath string,
 	st *storage.LocalStorage,
 	tm *transfer.TransferManager,
-	trackerAddr, selfID, advertiseAddr string,
+	announce announceFunc,
 ) (*filemeta.FileMeta, error) {
 
 	meta, err := filemeta.CreateFileMeta(filePath)
@@ -37,7 +42,7 @@ func seedFile(
 	tm.AddSession(session)
 	tm.RegisterMeta(meta)
 
-	if err := announceToTracker(trackerAddr, selfID, meta.FileID, advertiseAddr); err != nil {
+	if err := announce(meta.FileID); err != nil {
 		return nil, fmt.Errorf("announce %s to tracker: %w", meta.FileID, err)
 	}
 
